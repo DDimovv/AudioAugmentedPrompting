@@ -1,0 +1,11 @@
+# Python bytecode and caches
+__pycache__/
+*.py[cod]
+*$py.class
+results/
+# Local cache directory (generated outputs)
+cache/
+# Piper TTS model files
+piper_models/
+# Editor settings
+.vscode/

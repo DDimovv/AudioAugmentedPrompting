@@ -1,0 +1,11 @@
+torch
+transformers
+datasets
+tqdm
+soundfile
+librosa
+scikit-learn
+bitsandbytes
+accelerate
+piper-tts
+pathvalidate
