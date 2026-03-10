@@ -82,4 +82,3 @@ All intermediate outputs are written to the `cache/` directory as JSONL files. F
 - Phases 1, 4, 5, 6 are text-only and do not need Piper.
 - The notebooks (`.ipynb`) contain the same code as the scripts, with `!pip install` cells for Colab use.
 - Scripts use 8-bit quantization (`bitsandbytes`) to fit Qwen3-Omni-30B on a single GPU.
-- If Qwen3-Omni-30B is a gated model, you may need to log in first: `huggingface-cli login`.
