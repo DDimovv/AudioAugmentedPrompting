@@ -7,7 +7,7 @@ import soundfile as sf
 import librosa
 
 from datasets import load_dataset
-from transformers import AutoProcessor, Qwen3OmniForConditionalGeneration, BitsAndBytesConfig
+from transformers import AutoProcessor, AutoModelForTextToWaveform, BitsAndBytesConfig
 
 # ---------------- CONFIG -------------------
 HF_DATASET = "frostymelonade/SemEval2017-task7-pun-detection"
@@ -15,7 +15,7 @@ HF_SPLIT = "test"
 
 TYPES = {"heterographic", "homographic"}
 
-MODEL_ID = "Qwen/Qwen3-Omni-30B"
+MODEL_ID = "Qwen/Qwen3-Omni-30B-A3B-Instruct"
 MAX_NEW_TOKENS = 120
 
 PIPER_MODEL = os.environ.get("PIPER_MODEL", "piper_models/en_US-lessac-medium.onnx")
@@ -156,7 +156,7 @@ torch.set_grad_enabled(False)
 quantization_config = BitsAndBytesConfig(load_in_8bit=True)
 
 processor = AutoProcessor.from_pretrained(MODEL_ID)
-model = Qwen3OmniForConditionalGeneration.from_pretrained(
+model = AutoModelForTextToWaveform.from_pretrained(
     MODEL_ID,
     quantization_config=quantization_config,
     device_map="auto",
@@ -223,3 +223,4 @@ with open(OUT_ALL, "w", encoding="utf-8") as fa, \
         (fh if it["type"] == "heterographic" else fm).write(line)
 
 print("=== DONE: Text + Audio experiment complete ===")
+

@@ -6,7 +6,7 @@ import soundfile as sf
 import librosa
 from tqdm import tqdm
 from datasets import load_dataset
-from transformers import AutoProcessor, Qwen3OmniForConditionalGeneration, BitsAndBytesConfig
+from transformers import AutoProcessor, AutoModelForTextToWaveform, BitsAndBytesConfig
 
 # ================= CONFIG =================
 
@@ -15,7 +15,7 @@ DATASET_SPLIT = "train"
 
 OUT_PATH = "cache/pun_explanations_qwen_audio_only.jsonl"
 
-MODEL_ID = "Qwen/Qwen3-Omni-30B"
+MODEL_ID = "Qwen/Qwen3-Omni-30B-A3B-Instruct"
 MAX_NEW_TOKENS = 120
 
 # TTS
@@ -106,7 +106,7 @@ def main():
     quantization_config = BitsAndBytesConfig(load_in_8bit=True)
 
     processor = AutoProcessor.from_pretrained(MODEL_ID)
-    model = Qwen3OmniForConditionalGeneration.from_pretrained(
+    model = AutoModelForTextToWaveform.from_pretrained(
         MODEL_ID,
         quantization_config=quantization_config,
         device_map="auto",
@@ -201,3 +201,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

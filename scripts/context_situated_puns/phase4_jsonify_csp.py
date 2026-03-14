@@ -1,11 +1,11 @@
 import json
 import torch
 from tqdm import tqdm
-from transformers import AutoProcessor, Qwen3OmniForConditionalGeneration, BitsAndBytesConfig
+from transformers import AutoProcessor, AutoModelForTextToWaveform, BitsAndBytesConfig
 
 #----------------- CONFIG -----------------
 
-MODEL_ID = "Qwen/Qwen3-Omni-30B"
+MODEL_ID = "Qwen/Qwen3-Omni-30B-A3B-Instruct"
 MAX_NEW_TOKENS = 150
 
 # Phase-1 / Phase-2 inputs
@@ -49,7 +49,7 @@ device = "cuda" if torch.cuda.is_available() else "cpu"
 quantization_config = BitsAndBytesConfig(load_in_8bit=True)
 
 processor = AutoProcessor.from_pretrained(MODEL_ID)
-model = Qwen3OmniForConditionalGeneration.from_pretrained(
+model = AutoModelForTextToWaveform.from_pretrained(
     MODEL_ID,
     quantization_config=quantization_config,
     device_map="auto",
@@ -145,3 +145,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

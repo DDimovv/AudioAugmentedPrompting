@@ -3,7 +3,7 @@ import json
 import torch
 from tqdm import tqdm
 from datasets import load_dataset
-from transformers import AutoProcessor, Qwen3OmniForConditionalGeneration, BitsAndBytesConfig
+from transformers import AutoProcessor, AutoModelForTextToWaveform, BitsAndBytesConfig
 
 # ---------------- CONFIG ----------------
 
@@ -12,7 +12,7 @@ DATASET_SPLIT = "train"
 
 OUT_PATH = "cache/joke_explanations_qwen.jsonl"
 
-MODEL_ID = "Qwen/Qwen3-Omni-30B"
+MODEL_ID = "Qwen/Qwen3-Omni-30B-A3B-Instruct"
 MAX_NEW_TOKENS = 120
 
 # -------------- PROMPT -----------------
@@ -33,7 +33,7 @@ Instructions:
 - Mention wordplay, ambiguity, or implied meaning if present.
 - If the joke is not based on wordplay, explain the humor mechanism briefly.
 
-Write a concise paragraph (3–6 sentences).
+Write a concise paragraph (3-6 sentences).
 
 Joke:
 {joke}
@@ -52,7 +52,7 @@ def main():
     quantization_config = BitsAndBytesConfig(load_in_8bit=True)
 
     processor = AutoProcessor.from_pretrained(MODEL_ID)
-    model = Qwen3OmniForConditionalGeneration.from_pretrained(
+    model = AutoModelForTextToWaveform.from_pretrained(
         MODEL_ID,
         quantization_config=quantization_config,
         device_map="auto",
@@ -121,3 +121,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
