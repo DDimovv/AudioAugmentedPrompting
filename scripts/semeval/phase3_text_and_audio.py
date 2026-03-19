@@ -1,6 +1,5 @@
 import os
 import json
-import subprocess
 import torch
 from tqdm import tqdm
 import soundfile as sf
@@ -18,7 +17,6 @@ TYPES = {"heterographic", "homographic"}
 MODEL_ID = "Qwen/Qwen3-Omni-30B-A3B-Instruct"
 MAX_NEW_TOKENS = 120
 
-PIPER_MODEL = os.environ.get("PIPER_MODEL", "piper_models/en_US-lessac-medium.onnx")
 AUDIO_DIR = "cache/tts"
 AUDIO_EXT = ".wav"
 
@@ -31,7 +29,6 @@ os.makedirs(AUDIO_DIR, exist_ok=True)
 os.makedirs("cache", exist_ok=True)
 
 # ---------------- PROMPT ----------------
-
 AUDIO_PROMPT_TEMPLATE = """Explain whether the following text contains a pun.
 
 You are given the written text and its spoken audio.
@@ -41,11 +38,11 @@ Instructions:
 - Do NOT define what a pun is.
 - Focus ONLY on the linguistic mechanism.
 - If the text is a pun, clearly state:
-  \u2022 the word or phrase involved
-  \u2022 the two meanings or sound-based ambiguity
+  • the word or phrase involved
+  • the two meanings or sound-based ambiguity
 - If it is not a pun, clearly state that no wordplay or ambiguity is present.
 
-Write a concise paragraph (3\u20136 sentences).
+Write a concise paragraph (3–6 sentences).
 
 Text:
 {text}
@@ -70,14 +67,33 @@ def normalize_id(x):
 
 def load_audio(path, target_sr=16000):
     wav, sr = sf.read(path)
+
+    if wav.ndim > 1:
+        wav = wav.mean(axis=1)
+
     if sr != target_sr:
         wav = librosa.resample(wav, orig_sr=sr, target_sr=target_sr)
+
     return wav
 
+def verify_wavs(audio_dir):
+    bad = []
+    for fn in os.listdir(audio_dir):
+        if not fn.endswith(".wav"):
+            continue
+        try:
+            info = sf.info(os.path.join(audio_dir, fn))
+            if info.frames == 0:
+                bad.append(fn)
+        except Exception:
+            bad.append(fn)
+
+    print("Bad wav files:", len(bad))
+    assert len(bad) == 0, "Some WAV files are invalid"
 
 
-#------------------PHASE A - OFFLINE TTS----------------
-print("=== Phase A: Generating TTS ===")
+# ---------------- LOAD DATASET METADATA ONLY ----------------
+print("=== Reusing existing TTS files ===")
 
 ds = load_dataset(HF_DATASET, split=HF_SPLIT)
 
@@ -99,58 +115,12 @@ items = []
 for t in sorted(grouped.keys()):
     items.extend(grouped[t])
 
-def generate_tts(text, uid):
-    out_wav = os.path.join(AUDIO_DIR, uid + AUDIO_EXT)
-
-    if os.path.exists(out_wav) and os.path.getsize(out_wav) > 1000:
-        return True
-
-    p = subprocess.run(
-        [
-            "piper",
-            "--model", PIPER_MODEL,
-            "--output_file", out_wav,
-        ],
-        input=text + "\n",
-        text=True,
-        capture_output=True,
-    )
-
-    if p.returncode != 0:
-        print(f"[PIPER ERROR] {uid}")
-        print(p.stderr)
-        return False
-
-    if not os.path.exists(out_wav) or os.path.getsize(out_wav) < 1000:
-        return False
-
-    return True
-
-ok = 0
-for it in tqdm(items, desc="TTS"):
-    if generate_tts(it["text"], it["id"]):
-        ok += 1
-
-print(f"TTS generated for {ok}/{len(items)} items")
-
-# ---------------VERIFY WAVS---------------
-bad = []
-for fn in os.listdir(AUDIO_DIR):
-    try:
-        info = sf.info(os.path.join(AUDIO_DIR, fn))
-        if info.frames == 0:
-            bad.append(fn)
-    except:
-        bad.append(fn)
-
-print("Bad wav files:", len(bad))
-assert len(bad) == 0, "Some WAV files are invalid"
+verify_wavs(AUDIO_DIR)
 
 
-#-------------------PHASE B \u2014 QWEN3-OMNI-------------------
+# ---------------- PHASE B — QWEN3-OMNI ----------------
 print("=== Phase B: Qwen3-Omni inference ===")
 
-device = "cuda"
 torch.set_grad_enabled(False)
 
 quantization_config = BitsAndBytesConfig(load_in_8bit=True)
@@ -205,7 +175,9 @@ with open(OUT_ALL, "w", encoding="utf-8") as fa, \
     for it in tqdm(items, desc="Inference"):
         uid = it["id"]
         wav = os.path.join(AUDIO_DIR, uid + AUDIO_EXT)
+
         if not os.path.exists(wav):
+            print(f"[MISSING WAV] {uid}")
             continue
 
         reason = generate_reason(it["text"], uid)
@@ -220,7 +192,10 @@ with open(OUT_ALL, "w", encoding="utf-8") as fa, \
 
         line = json.dumps(obj, ensure_ascii=False) + "\n"
         fa.write(line)
-        (fh if it["type"] == "heterographic" else fm).write(line)
+
+        if it["type"] == "heterographic":
+            fh.write(line)
+        elif it["type"] == "homographic":
+            fm.write(line)
 
 print("=== DONE: Text + Audio experiment complete ===")
-
