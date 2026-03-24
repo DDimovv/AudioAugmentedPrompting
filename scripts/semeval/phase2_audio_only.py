@@ -43,6 +43,7 @@ Instructions:
 Write a concise paragraph (3–6 sentences).
 """
 
+
 def build_messages(audio_path):
     return [
         {"role": "system", "content": "You are an expert linguist."},
@@ -60,17 +61,25 @@ def build_messages(audio_path):
 def normalize_id(x):
     return str(x).strip() if x else None
 
+
 def load_audio(path, target_sr=16000):
     wav, sr = sf.read(path)
+
+    if len(wav.shape) > 1:
+        wav = wav.mean(axis=1)
+
     if sr != target_sr:
         wav = librosa.resample(wav, orig_sr=sr, target_sr=target_sr)
-    return wav
+
+    return wav.astype("float32")
+
 
 def load_done_ids(path):
     if not os.path.exists(path):
         return set()
     with open(path, encoding="utf-8") as f:
         return {json.loads(l).get("id") for l in f}
+
 
 def verify_wavs(audio_dir):
     bad = []
@@ -87,6 +96,26 @@ def verify_wavs(audio_dir):
     print("Bad wav files:", len(bad))
     assert len(bad) == 0, "Some WAV files are invalid"
 
+
+def move_inputs_to_model(inputs, model):
+    moved = {}
+    model_dtype = getattr(model, "dtype", None)
+
+    for k, v in inputs.items():
+        if torch.is_tensor(v):
+            if v.is_floating_point():
+                if model_dtype is not None:
+                    moved[k] = v.to(model.device, dtype=model_dtype)
+                else:
+                    moved[k] = v.to(model.device)
+            else:
+                moved[k] = v.to(model.device)
+        else:
+            moved[k] = v
+
+    return moved
+
+
 def generate_reason(uid, processor, model):
     wav_path = os.path.join(AUDIO_DIR, uid + AUDIO_EXT)
     messages = build_messages(wav_path)
@@ -101,24 +130,30 @@ def generate_reason(uid, processor, model):
 
     inputs = processor(
         text=prompt,
-        audios=[audio],
+        audio=[audio],
         sampling_rate=16000,
         return_tensors="pt",
         padding=True,
-    ).to(model.device)
-
-    out = model.generate(
-        **inputs,
-        max_new_tokens=MAX_NEW_TOKENS,
-        min_new_tokens=40,
-        do_sample=False,
-        return_audio=False,
     )
 
+    inputs = move_inputs_to_model(inputs, model)
+
+    with torch.inference_mode():
+        out = model.generate(
+            **inputs,
+            max_new_tokens=MAX_NEW_TOKENS,
+            min_new_tokens=40,
+            do_sample=False,
+            return_audio=False,
+        )
+
+    generated_tokens = out[:, inputs["input_ids"].shape[1]:]
+
     return processor.batch_decode(
-        out[:, inputs["input_ids"].shape[1]:],
+        generated_tokens,
         skip_special_tokens=True,
     )[0].strip()
+
 
 def main():
     print("=== Phase B: Qwen3-Omni inference (audio-only) ===")
@@ -153,7 +188,7 @@ def main():
         MODEL_ID,
         quantization_config=quantization_config,
         device_map="auto",
-        torch_dtype="auto",
+        torch_dtype=torch.bfloat16,
     ).eval()
 
     os.makedirs(os.path.dirname(OUT_ALL), exist_ok=True)
@@ -173,7 +208,11 @@ def main():
                 print(f"[MISSING WAV] {uid}")
                 continue
 
-            reason = generate_reason(uid, processor, model)
+            try:
+                reason = generate_reason(uid, processor, model)
+            except Exception as e:
+                print(f"[ERROR] {uid}: {e}")
+                continue
 
             out_obj = {
                 "id": uid,
@@ -195,7 +234,8 @@ def main():
             f_het.flush()
             f_hom.flush()
 
-            torch.cuda.empty_cache()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
 
     print("Done.")
     print(f"ALL -> {OUT_ALL}")

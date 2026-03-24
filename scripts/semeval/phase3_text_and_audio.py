@@ -48,6 +48,7 @@ Text:
 {text}
 """
 
+
 def build_messages(text, audio_path):
     return [
         {"role": "system", "content": "You are an expert linguist."},
@@ -65,16 +66,18 @@ def build_messages(text, audio_path):
 def normalize_id(x):
     return str(x).strip() if x else None
 
+
 def load_audio(path, target_sr=16000):
     wav, sr = sf.read(path)
 
-    if wav.ndim > 1:
+    if len(wav.shape) > 1:
         wav = wav.mean(axis=1)
 
     if sr != target_sr:
         wav = librosa.resample(wav, orig_sr=sr, target_sr=target_sr)
 
-    return wav
+    return wav.astype("float32")
+
 
 def verify_wavs(audio_dir):
     bad = []
@@ -90,6 +93,25 @@ def verify_wavs(audio_dir):
 
     print("Bad wav files:", len(bad))
     assert len(bad) == 0, "Some WAV files are invalid"
+
+
+def move_inputs_to_model(inputs, model):
+    moved = {}
+    model_dtype = getattr(model, "dtype", None)
+
+    for k, v in inputs.items():
+        if torch.is_tensor(v):
+            if v.is_floating_point():
+                if model_dtype is not None:
+                    moved[k] = v.to(model.device, dtype=model_dtype)
+                else:
+                    moved[k] = v.to(model.device)
+            else:
+                moved[k] = v.to(model.device)
+        else:
+            moved[k] = v
+
+    return moved
 
 
 # ---------------- LOAD DATASET METADATA ONLY ----------------
@@ -122,7 +144,6 @@ verify_wavs(AUDIO_DIR)
 print("=== Phase B: Qwen3-Omni inference ===")
 
 torch.set_grad_enabled(False)
-
 quantization_config = BitsAndBytesConfig(load_in_8bit=True)
 
 processor = AutoProcessor.from_pretrained(MODEL_ID)
@@ -130,8 +151,9 @@ model = AutoModelForTextToWaveform.from_pretrained(
     MODEL_ID,
     quantization_config=quantization_config,
     device_map="auto",
-    torch_dtype="auto",
+    torch_dtype=torch.bfloat16,
 ).eval()
+
 
 def generate_reason(text, uid):
     wav_path = os.path.join(AUDIO_DIR, uid + AUDIO_EXT)
@@ -147,24 +169,30 @@ def generate_reason(text, uid):
 
     inputs = processor(
         text=prompt,
-        audios=[audio],
+        audio=[audio],
         sampling_rate=16000,
         return_tensors="pt",
         padding=True,
-    ).to(model.device)
-
-    out = model.generate(
-        **inputs,
-        max_new_tokens=MAX_NEW_TOKENS,
-        min_new_tokens=40,
-        do_sample=False,
-        return_audio=False,
     )
 
+    inputs = move_inputs_to_model(inputs, model)
+
+    with torch.inference_mode():
+        out = model.generate(
+            **inputs,
+            max_new_tokens=MAX_NEW_TOKENS,
+            min_new_tokens=40,
+            do_sample=False,
+            return_audio=False,
+        )
+
+    generated_tokens = out[:, inputs["input_ids"].shape[1]:]
+
     return processor.batch_decode(
-        out[:, inputs["input_ids"].shape[1]:],
+        generated_tokens,
         skip_special_tokens=True,
     )[0].strip()
+
 
 os.makedirs(os.path.dirname(OUT_ALL), exist_ok=True)
 
@@ -180,7 +208,11 @@ with open(OUT_ALL, "w", encoding="utf-8") as fa, \
             print(f"[MISSING WAV] {uid}")
             continue
 
-        reason = generate_reason(it["text"], uid)
+        try:
+            reason = generate_reason(it["text"], uid)
+        except Exception as e:
+            print(f"[ERROR] {uid}: {e}")
+            continue
 
         obj = {
             "id": uid,
@@ -197,5 +229,12 @@ with open(OUT_ALL, "w", encoding="utf-8") as fa, \
             fh.write(line)
         elif it["type"] == "homographic":
             fm.write(line)
+
+        fa.flush()
+        fh.flush()
+        fm.flush()
+
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
 print("=== DONE: Text + Audio experiment complete ===")
