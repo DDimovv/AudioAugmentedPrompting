@@ -4,11 +4,15 @@ from tqdm import tqdm
 from collections import Counter
 
 from transformers import AutoProcessor, AutoModelForTextToWaveform, BitsAndBytesConfig
+from transformers.models.qwen3_omni_moe.configuration_qwen3_omni_moe import (
+    Qwen3OmniMoeTalkerCodePredictorConfig,
+)
 
-#--------------- CONFIG ---------------
+# --------------- CONFIG ---------------
 
 MODEL_ID = "Qwen/Qwen3-Omni-30B-A3B-Instruct"
 MAX_NEW_TOKENS = 80
+BATCH_SIZE = 5
 
 TEXT_HET = "cache/phase4_text.heterographic.jsonl"
 TEXT_HOM = "cache/phase4_text.homographic.jsonl"
@@ -19,7 +23,7 @@ AUDIO_HOM = "cache/phase4_audio.homographic.jsonl"
 OUT_HET = "cache/phase5_judge_text_vs_audio.heterographic.jsonl"
 OUT_HOM = "cache/phase5_judge_text_vs_audio.homographic.jsonl"
 
-# ----------------JUDGE PROMPT -----------------
+# ---------------- JUDGE PROMPT -----------------
 
 JUDGE_PROMPT = """You are a strict evaluator of linguistic explanations.
 
@@ -53,12 +57,15 @@ device = "cuda" if torch.cuda.is_available() else "cpu"
 
 quantization_config = BitsAndBytesConfig(load_in_8bit=True)
 
+# runtime workaround for missing attribute bug
+if not hasattr(Qwen3OmniMoeTalkerCodePredictorConfig, "use_sliding_window"):
+    Qwen3OmniMoeTalkerCodePredictorConfig.use_sliding_window = False
+
 processor = AutoProcessor.from_pretrained(MODEL_ID)
 model = AutoModelForTextToWaveform.from_pretrained(
     MODEL_ID,
-    quantization_config=quantization_config,
     device_map="auto",
-    torch_dtype="auto",
+    torch_dtype=torch.float16,
 ).eval()
 
 # ---------------- HELPERS -----------------
@@ -67,20 +74,47 @@ def load_map(path):
     with open(path, encoding="utf-8") as f:
         return {x["id"]: x for x in map(json.loads, f)}
 
-def generate_judge(prompt: str):
-    messages = [
-        {"role": "system", "content": "You are a judge that outputs ONLY valid JSON."},
-        {"role": "user", "content": prompt},
-    ]
 
-    text = processor.apply_chat_template(
-        messages,
-        tokenize=False,
-        add_generation_prompt=True,
-    )
+def parse_judge_output(decoded: str):
+    start = decoded.find("{")
+    end = decoded.rfind("}")
+
+    if start != -1 and end != -1:
+        try:
+            obj = json.loads(decoded[start:end + 1])
+            if obj.get("Choice") in {
+                "Explanation 1 is much better",
+                "Explanation 2 is much better",
+                "Explanation 1 and 2 are of similar quality",
+            }:
+                return {
+                    "Choice": obj.get("Choice"),
+                    "Reason": obj.get("Reason"),
+                }
+        except Exception:
+            pass
+
+    return {"Choice": "INVALID", "Reason": "Parse failure"}
+
+
+def generate_judge_batch(prompts):
+    chat_texts = []
+
+    for prompt in prompts:
+        messages = [
+            {"role": "system", "content": "You are a judge that outputs ONLY valid JSON."},
+            {"role": "user", "content": prompt},
+        ]
+
+        text = processor.apply_chat_template(
+            messages,
+            tokenize=False,
+            add_generation_prompt=True,
+        )
+        chat_texts.append(text)
 
     inputs = processor(
-        text=text,
+        text=chat_texts,
         return_tensors="pt",
         padding=True,
     ).to(model.device)
@@ -93,21 +127,23 @@ def generate_judge(prompt: str):
             return_audio=False,
         )
 
-    decoded = processor.batch_decode(
-        out[:, inputs["input_ids"].shape[1]:],
+    input_lengths = inputs["attention_mask"].sum(dim=1).tolist()
+    generated_parts = []
+
+    for i, input_len in enumerate(input_lengths):
+        generated_parts.append(out[i, int(input_len):])
+
+    decoded_batch = processor.batch_decode(
+        generated_parts,
         skip_special_tokens=True,
-    )[0].strip()
+    )
 
-    print(decoded)
-    # robust JSON extraction
-    start, end = decoded.find("{"), decoded.rfind("}")
-    if start != -1 and end != -1:
-        try:
-            return json.loads(decoded[start:end + 1])
-        except Exception:
-            pass
+    return [parse_judge_output(decoded.strip()) for decoded in decoded_batch]
 
-    return {"Choice": "INVALID", "Reason": "Parse failure"}
+
+def chunked(lst, size):
+    for i in range(0, len(lst), size):
+        yield lst[i:i + size]
 
 # ---------------- RUN -----------------
 
@@ -121,29 +157,38 @@ def run_judge(text_path, audio_path, out_path, label):
     votes = Counter()
 
     with open(out_path, "w", encoding="utf-8") as f:
-        for i in tqdm(ids):
-            t = text_items[i]
-            a = audio_items[i]
+        for batch_ids in tqdm(chunked(ids, BATCH_SIZE), total=(len(ids) + BATCH_SIZE - 1) // BATCH_SIZE):
+            prompts = []
+            batch_pairs = []
 
-            prompt = JUDGE_PROMPT.format(
-                text=t["Text"],
-                exp1=t["Reason"],
-                exp2=a["Reason"],
-            )
+            for i in batch_ids:
+                t = text_items[i]
+                a = audio_items[i]
 
-            judge = generate_judge(prompt)
-            choice = judge.get("Choice", "INVALID")
-            votes[choice] += 1
+                prompt = JUDGE_PROMPT.format(
+                    text=t["Text"],
+                    exp1=t["Reason"],
+                    exp2=a["Reason"],
+                )
 
-            out = {
-                "id": i,
-                "type": label,
-                "judge": judge,
-                "text_reason": t["Reason"],
-                "audio_reason": a["Reason"],
-            }
+                prompts.append(prompt)
+                batch_pairs.append((i, t, a))
 
-            f.write(json.dumps(out, ensure_ascii=False) + "\n")
+            judges = generate_judge_batch(prompts)
+
+            for (i, t, a), judge in zip(batch_pairs, judges):
+                choice = judge.get("Choice", "INVALID")
+                votes[choice] += 1
+
+                out = {
+                    "id": i,
+                    "type": label,
+                    "judge": judge,
+                    "text_reason": t["Reason"],
+                    "audio_reason": a["Reason"],
+                }
+
+                f.write(json.dumps(out, ensure_ascii=False) + "\n")
 
     # ------- PRINT STATS ---------
     total = sum(votes.values())
@@ -159,4 +204,3 @@ def run_judge(text_path, audio_path, out_path, label):
 if __name__ == "__main__":
     run_judge(TEXT_HET, AUDIO_HET, OUT_HET, "heterographic")
     run_judge(TEXT_HOM, AUDIO_HOM, OUT_HOM, "homographic")
-
