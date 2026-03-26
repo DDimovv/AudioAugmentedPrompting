@@ -2,11 +2,15 @@ import json
 import torch
 from tqdm import tqdm
 from transformers import AutoProcessor, AutoModelForTextToWaveform, BitsAndBytesConfig
+from transformers.models.qwen3_omni_moe.configuration_qwen3_omni_moe import (
+    Qwen3OmniMoeTalkerCodePredictorConfig,
+)
 
 # --------------- CONFIG ----------------
 
 MODEL_ID = "Qwen/Qwen3-Omni-30B-A3B-Instruct"
 MAX_NEW_TOKENS = 200
+BATCH_SIZE = 5
 
 TEXT_HET_IN = "cache/phase1_text_only_raw.heterographic.jsonl"
 TEXT_HOM_IN = "cache/phase1_text_only_raw.homographic.jsonl"
@@ -53,11 +57,15 @@ Explanation:
 {reason}
 """
 
-# ------------------MODEL----------------
+# ------------------ MODEL ----------------
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
 
 quantization_config = BitsAndBytesConfig(load_in_8bit=True)
+
+# runtime workaround for missing attribute bug
+if not hasattr(Qwen3OmniMoeTalkerCodePredictorConfig, "use_sliding_window"):
+    Qwen3OmniMoeTalkerCodePredictorConfig.use_sliding_window = False
 
 processor = AutoProcessor.from_pretrained(MODEL_ID)
 model = AutoModelForTextToWaveform.from_pretrained(
@@ -67,24 +75,51 @@ model = AutoModelForTextToWaveform.from_pretrained(
     torch_dtype="auto",
 ).eval()
 
-#  ---------------HELPERS---------------
+# --------------- HELPERS ----------------
 
-def generate_json(reason_text: str):
-    prompt_text = JSONIFY_PROMPT.format(reason=reason_text)
+def parse_json_output(decoded: str):
+    start = decoded.find("{")
+    end = decoded.rfind("}")
 
-    messages = [
-        {"role": "system", "content": "You are a classification system that outputs ONLY valid JSON."},
-        {"role": "user", "content": prompt_text},
-    ]
+    if start == -1 or end == -1:
+        return {"Reason": None, "Choice": None}
 
-    prompt = processor.apply_chat_template(
-        messages,
-        tokenize=False,
-        add_generation_prompt=True,
-    )
+    try:
+        obj = json.loads(decoded[start:end + 1])
+        if obj.get("Choice") in {"The text is a pun", "The text is not a pun"}:
+            return {
+                "Reason": obj.get("Reason"),
+                "Choice": obj.get("Choice"),
+            }
+    except Exception:
+        pass
+
+    return {"Reason": None, "Choice": None}
+
+
+def generate_json_batch(reason_texts):
+    prompts = []
+
+    for reason_text in reason_texts:
+        prompt_text = JSONIFY_PROMPT.format(reason=reason_text)
+
+        messages = [
+            {
+                "role": "system",
+                "content": "You are a classification system that outputs ONLY valid JSON."
+            },
+            {"role": "user", "content": prompt_text},
+        ]
+
+        prompt = processor.apply_chat_template(
+            messages,
+            tokenize=False,
+            add_generation_prompt=True,
+        )
+        prompts.append(prompt)
 
     inputs = processor(
-        text=prompt,
+        text=prompts,
         return_tensors="pt",
         padding=True,
     ).to(model.device)
@@ -97,53 +132,50 @@ def generate_json(reason_text: str):
             return_audio=False,
         )
 
-    decoded = processor.batch_decode(
-        out[:, inputs["input_ids"].shape[1]:],
+    input_lengths = inputs["attention_mask"].sum(dim=1).tolist()
+    generated_parts = []
+
+    for i, input_len in enumerate(input_lengths):
+        generated_parts.append(out[i, int(input_len):])
+
+    decoded_batch = processor.batch_decode(
+        generated_parts,
         skip_special_tokens=True,
-    )[0].strip()
+    )
 
-    start, end = decoded.find("{"), decoded.rfind("}")
-    if start == -1 or end == -1:
-        return None
+    return [parse_json_output(decoded.strip()) for decoded in decoded_batch]
 
-    try:
-        obj = json.loads(decoded[start:end+1])
-        if obj.get("Choice") in {"The text is a pun", "The text is not a pun"}:
-            return obj
-    except Exception:
-        pass
 
-    return None
+def chunked(lst, size):
+    for i in range(0, len(lst), size):
+        yield lst[i:i + size]
 
 
 def process_split(in_path, out_all, out_split, reason_key):
     with open(in_path, encoding="utf-8") as f:
-        items = [json.loads(l) for l in f]
+        items = [json.loads(line) for line in f]
 
-    with open(out_all, "a", encoding="utf-8") as f_all, \
-         open(out_split, "w", encoding="utf-8") as f_split:
+    valid_items = [item for item in items if item.get(reason_key)]
 
-        for item in tqdm(items, desc=f"JSONifying {in_path}"):
-            raw_reason = item.get(reason_key)
-            if not raw_reason:
-                continue
+    with open(out_all, "a", encoding="utf-8") as f_all, open(out_split, "w", encoding="utf-8") as f_split:
+        for batch in tqdm(chunked(valid_items, BATCH_SIZE), desc=f"JSONifying {in_path}"):
+            reasons = [item[reason_key] for item in batch]
+            parsed_batch = generate_json_batch(reasons)
 
-            parsed = generate_json(raw_reason)
-            if not parsed:
-                parsed = {"Reason": None, "Choice": None}
+            for item, parsed in zip(batch, parsed_batch):
+                out_obj = {
+                    "id": item["id"],
+                    "Text": item["Text"],
+                    "Reason": parsed["Reason"],
+                    "Choice": parsed["Choice"],
+                }
 
-            out_obj = {
-                "id": item["id"],
-                "Text": item["Text"],
-                "Reason": parsed["Reason"],
-                "Choice": parsed["Choice"],
-            }
+                line = json.dumps(out_obj, ensure_ascii=False) + "\n"
+                f_all.write(line)
+                f_split.write(line)
 
-            line = json.dumps(out_obj, ensure_ascii=False) + "\n"
-            f_all.write(line)
-            f_split.write(line)
+# ------------------ RUN -----------------
 
-# ------------------RUN -----------------
 def main():
     # TEXT
     process_split(TEXT_HET_IN, TEXT_ALL_OUT, TEXT_HET_OUT, "RawReason")
@@ -164,4 +196,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
