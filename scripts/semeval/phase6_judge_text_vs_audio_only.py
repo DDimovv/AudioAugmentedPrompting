@@ -60,11 +60,15 @@ quantization_config = BitsAndBytesConfig(load_in_8bit=True)
 if not hasattr(Qwen3OmniMoeTalkerCodePredictorConfig, "use_sliding_window"):
     Qwen3OmniMoeTalkerCodePredictorConfig.use_sliding_window = False
 
+processor = AutoProcessor.from_pretrained(MODEL_ID)
+
 model = AutoModelForTextToWaveform.from_pretrained(
     MODEL_ID,
     device_map="auto",
     torch_dtype=torch.float16,
+    quantization_config=quantization_config,
 ).eval()
+
 # ---------------- HELPERS -----------------
 
 def load_map(path):
@@ -142,6 +146,7 @@ def chunked(lst, size):
     for i in range(0, len(lst), size):
         yield lst[i:i + size]
 
+
 # ---------------- RUN -----------------
 
 def run_judge(text_path, audio_only_path, out_path, label):
@@ -154,7 +159,10 @@ def run_judge(text_path, audio_only_path, out_path, label):
     votes = Counter()
 
     with open(out_path, "w", encoding="utf-8") as f:
-        for batch_ids in tqdm(chunked(ids, BATCH_SIZE), total=(len(ids) + BATCH_SIZE - 1) // BATCH_SIZE):
+        for batch_ids in tqdm(
+            chunked(ids, BATCH_SIZE),
+            total=(len(ids) + BATCH_SIZE - 1) // BATCH_SIZE
+        ):
             prompts = []
             batch_pairs = []
 
@@ -194,6 +202,7 @@ def run_judge(text_path, audio_only_path, out_path, label):
         print(f"  {k}: {v} ({pct:.1f}%)")
 
     print("Wrote:", out_path)
+
 
 # ----------------- MAIN -----------------
 
