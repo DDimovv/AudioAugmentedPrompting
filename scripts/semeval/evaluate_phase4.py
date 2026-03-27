@@ -35,8 +35,8 @@ def choice_to_label(choice_text):
     return None
 
 
-def load_phase3_subset(jsonl_file_path):
-    """Load subset ids and mapped predictions from a phase3 JSONL file."""
+def load_prediction_subset(jsonl_file_path):
+    """Load subset ids and mapped predictions from an evaluation JSONL file."""
     subset_ids = []
     predictions = {}
 
@@ -123,29 +123,29 @@ def determine_gold_labels(filename, het_gold, hom_gold):
 
 
 def main():
-    project_root = Path(__file__).resolve().parent.parent
-    cache_dir = project_root / 'cache'
-    data_dir = project_root / 'data'
+    repo_root = Path(__file__).resolve().parents[2]
+    cache_dir = repo_root / 'cache'
+    data_dir = repo_root / 'data'
 
     het_gold = load_gold_labels(data_dir / 'ECNU_het.gold')
     hom_gold = load_gold_labels(data_dir / 'ECNU_hom.gold')
 
     print("=" * 80)
-    print("PHASE 3 EVALUATION RESULTS")
+    print("PHASE 4 EVALUATION RESULTS")
     print("=" * 80)
 
-    phase3_files = sorted(cache_dir.glob('phase3*.jsonl'))
+    phase4_files = sorted(cache_dir.glob('phase4*.jsonl'))
     per_file = []
     skipped_uncategorized = []
 
-    for jsonl_file in phase3_files:
+    for jsonl_file in phase4_files:
         filename = jsonl_file.name
         gold_labels = determine_gold_labels(filename, het_gold, hom_gold)
         if gold_labels is None:
             skipped_uncategorized.append(filename)
             continue
 
-        subset_ids, predictions = load_phase3_subset(jsonl_file)
+        subset_ids, predictions = load_prediction_subset(jsonl_file)
         metrics = calculate_subset_metrics(gold_labels, subset_ids, predictions)
         if metrics is None:
             continue
@@ -158,7 +158,7 @@ def main():
     print("=" * 80)
 
     if not per_file:
-        print("No evaluable phase3 files found.")
+        print("No evaluable phase4 files found.")
         print("=" * 80)
         return
 
